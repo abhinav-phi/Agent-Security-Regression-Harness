@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`forbidden_state_not_reached` assertion** — deterministic stateful
+  trajectory assertion for forbidden world states. Scenarios declare a state
+  model under `expected.state_model` (`initial` fields, `transitions` rules
+  over normalized effect events, `forbidden` predicates); the assertion folds
+  the trace's `type: "effect"` events in order, applies matching rules,
+  evaluates every predicate after each transition, and fails at the first
+  transition that makes a predicate true. Failure evidence reports the
+  transition index, predicate ID, and a redacted provenance chain (transition
+  indices, effect verbs, declared provenance references — no effect payloads),
+  consistent with the `memory_isolation` evidence-redaction precedent. Catches
+  composite failures such as read-confidential → archive → external-upload
+  chains where every individual tool call is permitted. Includes a paired
+  attack/control scenario (`sensitive_data_disclosure.composite_exfiltration_state_001`
+  and `..._control_001`), passing trace fixtures for both, a per-assertion doc
+  at `docs/assertions/forbidden-state-not-reached.md`, effect-event
+  documentation in `docs/trace-format.md`, and a new deterministic reducer
+  module `agent_harness.state_model` with full unit coverage. Scenario
+  validation is extended: when this assertion type is present,
+  `expected.state_model` must be structurally valid (Python validator only;
+  the JSON Schema stays permissive for `expected`, matching the documented
+  asymmetry). Per `docs/schema-versioning.md` this is a MINOR addition (new
+  assertion type); no schema file change is required because assertion types
+  are not enumerated in the schema.
+
 ## [0.2.0] — 2026-07-27
 
 Hardening and CI ergonomics. This release makes the harness comfortable to run
