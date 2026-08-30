@@ -283,9 +283,9 @@ conditional rules JSON Schema cannot express cheaply):
 - When an assertion has `type: forbidden_state_not_reached`, the scenario
   must define `expected.state_model` as a structurally valid state model
   (required `initial` / `transitions` / `forbidden` sections, typed
-  values, glob-pattern `when` matchers, predicate fields declared in
-  `initial` or written by some transition rule, and no predicate that is
-  already true in the initial state).
+  values, glob-pattern `when` matchers, predicate and `requires` guard
+  fields declared in `initial` or written by some transition rule, and
+  no predicate that is already true in the initial state).
 
 Both contracts are enforced by `tests/test_scenario_schema_sync.py`. If
 you change either side, that test will tell you whether you preserved

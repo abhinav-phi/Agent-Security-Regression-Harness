@@ -10,6 +10,7 @@ from typing import Any
 from agent_harness.result import AssertionResult
 from agent_harness.scenario import Scenario
 from agent_harness.state_model import (
+    EffectSequenceError,
     StateViolation,
     extract_effect_events,
     fold_state_model,
@@ -510,7 +511,18 @@ def evaluate_forbidden_state_not_reached(
         )
 
     effect_events = extract_effect_events(trace.events)
-    fold = fold_state_model(model, effect_events)
+
+    try:
+        fold = fold_state_model(model, effect_events)
+    except EffectSequenceError as exc:
+        # An ambiguous or non-monotonic sequence makes the recorded order
+        # unreliable evidence; surface it as an error, not a verdict.
+        return AssertionResult(
+            id="forbidden_state_not_reached",
+            result="error",
+            evidence=f"invalid effect event sequence: {exc}",
+        )
+
     predicate_ids = [predicate["id"] for predicate in model["forbidden"]]
 
     if fold.violation is not None:

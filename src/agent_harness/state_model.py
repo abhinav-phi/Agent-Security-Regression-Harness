@@ -24,13 +24,23 @@ from typing import Any
 EFFECT_EVENT_TYPE = "effect"
 
 STATE_MODEL_KEYS = {"initial", "transitions", "forbidden"}
-TRANSITION_KEYS = {"when", "set", "add"}
+TRANSITION_KEYS = {"when", "requires", "set", "add"}
 WHEN_KEYS = {"effect", "resource", "destination"}
 PREDICATE_KEYS = {"id", "all"}
 CONDITION_OPERATORS = ("equals", "not_equals", "greater_than", "less_than", "matches")
 
 SCALAR_TYPES = (bool, int, float, str)
 NUMERIC_TYPES = (int, float)
+
+
+class EffectSequenceError(ValueError):
+    """Raised when effect events violate the monotonic sequence contract.
+
+    Effect events may stamp an integer ``sequence`` at record time. When
+    some events carry a stamp and others do not, when stamps are not
+    integers, or when stamps repeat, the intended fold order is
+    ambiguous and the trace's evidence is unreliable.
+    """
 
 
 @dataclass(frozen=True)
@@ -103,6 +113,7 @@ def validate_state_model(model: Any) -> list[str]:
 
     declared_fields: set[str] = set()
     add_fields: set[str] = set()
+    guard_fields: set[str] = set()
 
     if not isinstance(initial, dict):
         errors.append("expected.state_model.initial must be an object")
@@ -121,7 +132,9 @@ def validate_state_model(model: Any) -> list[str]:
         errors.append("expected.state_model.transitions must be a non-empty list")
     else:
         for index, rule in enumerate(transitions):
-            errors.extend(_validate_transition_rule(index, rule, declared_fields, add_fields))
+            errors.extend(
+                _validate_transition_rule(index, rule, declared_fields, add_fields, guard_fields)
+            )
 
     if not isinstance(forbidden, list) or not forbidden:
         errors.append("expected.state_model.forbidden must be a non-empty list")
@@ -134,6 +147,13 @@ def validate_state_model(model: Any) -> list[str]:
             errors.append(
                 f"expected.state_model.initial.{name} must be a number because "
                 "a transition rule adds to it"
+            )
+
+    for name in sorted(guard_fields):
+        if name not in declared_fields:
+            errors.append(
+                f"expected.state_model.requires field '{name}' is not declared in "
+                "expected.state_model.initial or any transition rule"
             )
 
     # The fold only evaluates predicates after transitions. A predicate that
@@ -166,6 +186,7 @@ def _validate_transition_rule(
     rule: Any,
     declared_fields: set[str],
     add_fields: set[str],
+    guard_fields: set[str],
 ) -> list[str]:
     label = f"expected.state_model.transitions[{index}]"
     errors: list[str] = []
@@ -190,6 +211,17 @@ def _validate_transition_rule(
             errors.append(f"{label}.when.{key} must be a non-empty string")
     if "effect" not in when:
         errors.append(f"{label}.when.effect is required")
+
+    guard = rule.get("requires")
+    if guard is not None:
+        if not isinstance(guard, list) or not guard:
+            errors.append(f"{label}.requires must be a non-empty list")
+        else:
+            for condition_index, condition in enumerate(guard):
+                condition_label = f"{label}.requires[{condition_index}]"
+                errors.extend(_validate_condition_shape(condition_label, condition))
+                if isinstance(condition, dict) and _is_non_empty_string(condition.get("field")):
+                    guard_fields.add(condition["field"])
 
     has_set = isinstance(rule.get("set"), dict) and bool(rule["set"])
     has_add = isinstance(rule.get("add"), dict) and bool(rule["add"])
@@ -252,6 +284,29 @@ def _validate_condition(label: str, condition: Any, declared_fields: set[str]) -
     if not isinstance(condition, dict):
         return [f"{label} must be an object"]
 
+    errors = _validate_condition_shape(label, condition)
+    if errors:
+        return errors
+
+    if condition["field"] not in declared_fields:
+        errors.append(
+            f"{label}.field '{condition['field']}' is not declared in "
+            "expected.state_model.initial or any transition rule"
+        )
+
+    return errors
+
+
+def _validate_condition_shape(label: str, condition: Any) -> list[str]:
+    """Validate one condition's structure without checking field declaration.
+
+    Guard conditions may reference fields that a later transition rule
+    declares, so their declared-field check runs after all rules are
+    scanned instead of here.
+    """
+    if not isinstance(condition, dict):
+        return [f"{label} must be an object"]
+
     errors: list[str] = []
     present_operators = sorted(set(condition) & set(CONDITION_OPERATORS))
     unknown = sorted(set(condition) - {"field"} - set(CONDITION_OPERATORS))
@@ -260,11 +315,6 @@ def _validate_condition(label: str, condition: Any, declared_fields: set[str]) -
 
     if not _is_non_empty_string(condition.get("field")):
         errors.append(f"{label}.field must be a non-empty string")
-    elif condition["field"] not in declared_fields:
-        errors.append(
-            f"{label}.field '{condition['field']}' is not declared in "
-            "expected.state_model.initial or any transition rule"
-        )
 
     if len(present_operators) != 1:
         errors.append(
@@ -302,6 +352,56 @@ def extract_effect_events(events: list[Any]) -> list[dict[str, Any]]:
             effect_events.append(event)
 
     return effect_events
+
+
+def order_effect_events(effect_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order effect events for the fold according to the sequence contract.
+
+    Effect events may stamp an integer ``sequence`` at record time. When
+    every effect event stamps one, the stamped monotonic per-trace order
+    is authoritative and the events are sorted by it, so a trace folds
+    identically regardless of the order its JSON array was serialized in.
+    When no event stamps one, arrival order is used. A mixture of stamped
+    and unstamped events, non-integer stamps, or duplicate stamps leave
+    the intended order ambiguous and raise :class:`EffectSequenceError`.
+    """
+    stamped = ["sequence" in event for event in effect_events]
+
+    if any(stamped) and not all(stamped):
+        raise EffectSequenceError(
+            "some effect events carry a sequence stamp and others do not; "
+            "the intended fold order is ambiguous"
+        )
+
+    if not any(stamped):
+        return list(effect_events)
+
+    for index, event in enumerate(effect_events):
+        stamp = event["sequence"]
+        if not isinstance(stamp, int) or isinstance(stamp, bool):
+            raise EffectSequenceError(
+                f"effect event at arrival index {index} has a non-integer sequence stamp"
+            )
+
+    ordered = [
+        effect_events[index]
+        for index in sorted(
+            range(len(effect_events)),
+            key=lambda position: (effect_events[position]["sequence"], position),
+        )
+    ]
+
+    stamps = [event["sequence"] for event in ordered]
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for stamp in stamps:
+        if stamp in seen:
+            duplicates.add(stamp)
+        seen.add(stamp)
+    if duplicates:
+        raise EffectSequenceError(f"duplicate sequence stamps: {sorted(duplicates)}")
+
+    return ordered
 
 
 def _extract_provenance_refs(event: dict[str, Any]) -> tuple[str, ...]:
@@ -381,27 +481,42 @@ def _predicate_fields(predicate: dict[str, Any]) -> list[str]:
     return fields
 
 
+def _guard_holds(guard: Any, state: dict[str, Any]) -> bool:
+    """Return whether a transition rule's ``requires`` conditions hold.
+
+    Guards make fold order observable: a guarded rule applies only when
+    the current state satisfies its conditions, so effects that arrive
+    before their precondition is established do not contribute. A
+    condition on a field that is not present in the state never holds.
+    """
+    return all(_condition_holds(condition, state) for condition in guard)
+
+
 def fold_state_model(
     model: dict[str, Any],
     effect_events: list[dict[str, Any]],
 ) -> StateFoldResult:
     """Fold effect events through a state model and evaluate its predicates.
 
-    State starts at ``initial``. Each effect event is one transition: every
-    matching transition rule is applied in declared order, then every
-    forbidden predicate is evaluated. The fold returns at the first
-    predicate that becomes true and reports which transitions contributed
-    to each referenced state field.
+    State starts at ``initial``. Effect events are ordered by the sequence
+    contract (see :func:`order_effect_events`); each is one transition:
+    every matching transition rule whose ``requires`` guard holds is
+    applied in declared order, then every forbidden predicate is
+    evaluated. The fold returns at the first predicate that becomes true
+    and reports which transitions contributed to each referenced state
+    field.
     """
     state = deepcopy(model["initial"])
     field_provenance: dict[str, tuple[ProvenanceEntry, ...]] = {}
 
-    for transition_index, event in enumerate(effect_events, start=1):
+    for transition_index, event in enumerate(order_effect_events(effect_events), start=1):
         effect = str(event["effect"]).strip()
         provenance_refs = _extract_provenance_refs(event)
 
         for rule in model["transitions"]:
             if not _rule_matches(rule["when"], event, effect):
+                continue
+            if "requires" in rule and not _guard_holds(rule["requires"], state):
                 continue
 
             written_fields = list(rule.get("set", {})) + list(rule.get("add", {}))

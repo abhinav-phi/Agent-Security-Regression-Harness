@@ -20,18 +20,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indices, effect verbs, declared provenance references — no effect payloads),
   consistent with the `memory_isolation` evidence-redaction precedent. Catches
   composite failures such as read-confidential → archive → external-upload
-  chains where every individual tool call is permitted. Includes a paired
-  attack/control scenario (`sensitive_data_disclosure.composite_exfiltration_state_001`
-  and `..._control_001`), passing trace fixtures for both, a per-assertion doc
-  at `docs/assertions/forbidden-state-not-reached.md`, effect-event
-  documentation in `docs/trace-format.md`, and a new deterministic reducer
-  module `agent_harness.state_model` with full unit coverage. Scenario
-  validation is extended: when this assertion type is present,
-  `expected.state_model` must be structurally valid (Python validator only;
-  the JSON Schema stays permissive for `expected`, matching the documented
-  asymmetry). Per `docs/schema-versioning.md` this is a MINOR addition (new
-  assertion type); no schema file change is required because assertion types
-  are not enumerated in the schema.
+  chains where every individual tool call is permitted. Order-sensitive
+  outcomes are expressed with `requires` guards on transition rules, and
+  effect events may stamp a monotonic integer `sequence` at record time:
+  when every effect event stamps one, the stamped order is the authoritative
+  fold order (stable across re-serialized recordings), while mixed, duplicate,
+  or non-integer stamps surface as an `error` because the recorded order is
+  unreliable evidence. Includes a paired attack/control scenario
+  (`sensitive_data_disclosure.composite_exfiltration_state_001` and
+  `..._control_001`), passing trace fixtures for both, a per-assertion doc
+  at `docs/assertions/forbidden-state-not-reached.md` (including the
+  state-model coverage precondition), effect-event documentation in
+  `docs/trace-format.md`, and a new deterministic reducer module
+  `agent_harness.state_model` with full unit coverage. Scenario validation is
+  extended: when this assertion type is present, `expected.state_model` must
+  be structurally valid (Python validator only; the JSON Schema stays
+  permissive for `expected`, matching the documented asymmetry). Per
+  `docs/schema-versioning.md` this is a MINOR addition (new assertion type);
+  no schema file change is required because assertion types are not
+  enumerated in the schema.
 
 ## [0.2.0] — 2026-07-27
 

@@ -7,16 +7,23 @@ from typing import Any
 import pytest
 
 from agent_harness.state_model import (
+    EffectSequenceError,
     extract_effect_events,
     fold_state_model,
+    order_effect_events,
     validate_state_model,
 )
 
 
 def valid_model() -> dict[str, Any]:
-    """A minimal valid state model used as the base for test cases."""
+    """A minimal valid, order-sensitive state model used as the test base.
+
+    The upload rule is guarded by ``requires``, so an external upload only
+    increments the counter once confidential data has been loaded earlier
+    in the trajectory.
+    """
     return {
-        "initial": {"confidential_loaded": False, "external_uploads": 0},
+        "initial": {"confidential_loaded": False, "confidential_external_uploads": 0},
         "transitions": [
             {
                 "when": {"effect": "read", "resource": "records/confidential/*"},
@@ -24,16 +31,14 @@ def valid_model() -> dict[str, Any]:
             },
             {
                 "when": {"effect": "upload", "destination": "external:*"},
-                "add": {"external_uploads": 1},
+                "requires": [{"field": "confidential_loaded", "equals": True}],
+                "add": {"confidential_external_uploads": 1},
             },
         ],
         "forbidden": [
             {
                 "id": "confidential_exfiltrated",
-                "all": [
-                    {"field": "confidential_loaded", "equals": True},
-                    {"field": "external_uploads", "greater_than": 0},
-                ],
+                "all": [{"field": "confidential_external_uploads", "greater_than": 0}],
             }
         ],
     }
@@ -146,28 +151,28 @@ def test_validate_state_model_rejects_non_scalar_set_value():
 
 def test_validate_state_model_rejects_non_numeric_add_value():
     model = valid_model()
-    model["transitions"][1]["add"] = {"external_uploads": "many"}
+    model["transitions"][1]["add"] = {"confidential_external_uploads": "many"}
     assert any(
-        "add.external_uploads must be a number" in error
+        "add.confidential_external_uploads must be a number" in error
         for error in validate_state_model(model)
     )
 
 
 def test_validate_state_model_rejects_non_numeric_initial_for_add_field():
     model = valid_model()
-    model["initial"]["external_uploads"] = "none"
+    model["initial"]["confidential_external_uploads"] = "none"
     assert any(
-        "initial.external_uploads must be a number because a transition rule adds to it"
-        in error
+        "initial.confidential_external_uploads must be a number because "
+        "a transition rule adds to it" in error
         for error in validate_state_model(model)
     )
 
 
 def test_validate_state_model_rejects_non_numeric_set_for_add_field():
     model = valid_model()
-    model["transitions"][0]["set"] = {"external_uploads": "many"}
+    model["transitions"][0]["set"] = {"confidential_external_uploads": "many"}
     assert any(
-        "transitions[0].set.external_uploads must be a number because another "
+        "transitions[0].set.confidential_external_uploads must be a number because another "
         "transition rule adds to it" in error
         for error in validate_state_model(model)
     )
@@ -175,11 +180,49 @@ def test_validate_state_model_rejects_non_numeric_set_for_add_field():
 
 def test_validate_state_model_rejects_condition_field_not_declared():
     model = valid_model()
-    model["forbidden"][0]["all"][1]["field"] = "external_email_sent"
+    model["forbidden"][0]["all"][0]["field"] = "external_email_sent"
     errors = validate_state_model(model)
     assert any(
         "field 'external_email_sent' is not declared" in error for error in errors
     )
+
+
+def test_validate_state_model_rejects_guard_field_not_declared():
+    model = valid_model()
+    model["transitions"][1]["requires"] = [{"field": "never_declared", "equals": True}]
+    errors = validate_state_model(model)
+    assert any(
+        "requires field 'never_declared' is not declared" in error for error in errors
+    )
+
+
+def test_validate_state_model_accepts_guard_referencing_later_rule_field():
+    """A guard on rule 0 may reference a field only rule 1 sets: guards are
+    checked after all rules have been scanned for declared fields."""
+    model = {
+        "initial": {"started": False},
+        "transitions": [
+            {
+                "when": {"effect": "finish"},
+                "requires": [{"field": "prepared", "equals": True}],
+                "set": {"started": True},
+            },
+            {
+                "when": {"effect": "prepare"},
+                "set": {"prepared": True},
+            },
+        ],
+        "forbidden": [{"id": "p", "all": [{"field": "started", "equals": True}]}],
+    }
+
+    assert validate_state_model(model) == []
+
+
+def test_validate_state_model_rejects_non_list_requires():
+    model = valid_model()
+    model["transitions"][1]["requires"] = {"field": "confidential_loaded"}
+    errors = validate_state_model(model)
+    assert any("requires must be a non-empty list" in error for error in errors)
 
 
 def test_validate_state_model_rejects_condition_without_operator():
@@ -209,7 +252,10 @@ def test_validate_state_model_rejects_unknown_condition_key():
 
 def test_validate_state_model_rejects_non_numeric_comparison_threshold():
     model = valid_model()
-    model["forbidden"][0]["all"][1] = {"field": "external_uploads", "greater_than": "0"}
+    model["forbidden"][0]["all"][0] = {
+        "field": "confidential_external_uploads",
+        "greater_than": "0",
+    }
     assert any(
         "greater_than must be a number" in error for error in validate_state_model(model)
     )
@@ -265,7 +311,10 @@ def test_fold_applies_set_and_add_in_order():
     result = fold_state_model(valid_model(), events)
 
     assert result.violation is not None
-    assert result.final_state == {"confidential_loaded": True, "external_uploads": 1}
+    assert result.final_state == {
+        "confidential_loaded": True,
+        "confidential_external_uploads": 1,
+    }
     assert result.violation.predicate_id == "confidential_exfiltrated"
     assert result.violation.transition_index == 2
     assert result.violation.effect == "upload"
@@ -280,7 +329,7 @@ def test_fold_ignores_non_matching_events():
     result = fold_state_model(valid_model(), events)
 
     assert result.violation is None
-    assert result.final_state == {"confidential_loaded": False, "external_uploads": 0}
+    assert result.final_state == {"confidential_loaded": False, "confidential_external_uploads": 0}
 
 
 def test_fold_matching_is_case_sensitive():
@@ -300,7 +349,7 @@ def test_fold_requires_resource_and_destination_when_patterned():
     result = fold_state_model(valid_model(), events)
 
     assert result.violation is None
-    assert result.final_state == {"confidential_loaded": False, "external_uploads": 0}
+    assert result.final_state == {"confidential_loaded": False, "confidential_external_uploads": 0}
 
 
 def test_fold_accumulates_provenance_per_field():
@@ -328,7 +377,9 @@ def test_fold_accumulates_provenance_per_field():
     result = fold_state_model(valid_model(), events)
 
     assert result.violation is not None
-    field_provenance = dict(result.violation.field_provenance)
+    # The fold tracks provenance for every written field; the violation
+    # carries only the chains of the fields the fired predicate references.
+    field_provenance = dict(result.field_provenance)
 
     loaded_chain = field_provenance["confidential_loaded"]
     assert [(entry.transition_index, entry.effect) for entry in loaded_chain] == [
@@ -338,7 +389,9 @@ def test_fold_accumulates_provenance_per_field():
     assert loaded_chain[0].provenance_refs == ("doc-1",)
     assert loaded_chain[1].provenance_refs == ("doc-2",)
 
-    upload_chain = field_provenance["external_uploads"]
+    upload_chain = dict(result.violation.field_provenance)[
+        "confidential_external_uploads"
+    ]
     assert [(entry.transition_index, entry.effect) for entry in upload_chain] == [(3, "upload")]
     assert upload_chain[0].provenance_refs == ("evt-2",)
 
@@ -353,8 +406,7 @@ def test_fold_filters_non_string_provenance_refs():
     result = fold_state_model(model, events)
 
     assert result.violation is not None
-    field_provenance = dict(result.violation.field_provenance)
-    assert field_provenance["confidential_loaded"][0].provenance_refs == ("doc-1",)
+    assert dict(result.field_provenance)["confidential_loaded"][0].provenance_refs == ("doc-1",)
 
 
 def test_fold_condition_on_missing_field_never_holds():
@@ -431,7 +483,7 @@ def test_validate_state_model_rejects_predicate_true_in_initial_state():
 def test_fold_reports_first_predicate_that_becomes_true():
     model = valid_model()
     model["forbidden"] = [
-        {"id": "second", "all": [{"field": "external_uploads", "greater_than": 0}]},
+        {"id": "second", "all": [{"field": "confidential_external_uploads", "greater_than": 0}]},
         {"id": "first", "all": [{"field": "confidential_loaded", "equals": True}]},
     ]
 
@@ -448,17 +500,181 @@ def test_fold_evaluates_predicates_after_every_transition():
     model = valid_model()
     model["forbidden"] = [
         {
-            "id": "any_upload",
-            "all": [{"field": "external_uploads", "greater_than": 0}],
+            "id": "confidential_read",
+            "all": [{"field": "confidential_loaded", "equals": True}],
         }
     ]
 
     result = fold_state_model(
-        model, [effect("upload", destination="external://files.example/drop")]
+        model, [effect("read", resource="records/confidential/customer_42")]
     )
 
     assert result.violation is not None
     assert result.violation.transition_index == 1
+
+
+# ---------------------------------------------------------------------------
+# Order-sensitive guards (requires)
+# ---------------------------------------------------------------------------
+
+
+def test_guard_makes_predicate_order_sensitive_upload_first():
+    """An external upload that precedes the confidential read never counts:
+    the guarded rule does not apply before its precondition is established."""
+    events = [
+        effect("upload", destination="external://files.example/drop"),
+        effect("read", resource="records/confidential/customer_42"),
+    ]
+
+    result = fold_state_model(valid_model(), events)
+
+    assert result.violation is None
+    assert result.final_state == {
+        "confidential_loaded": True,
+        "confidential_external_uploads": 0,
+    }
+
+
+def test_guard_makes_predicate_order_sensitive_read_first():
+    """The same effects in the other order do reach the forbidden state."""
+    events = [
+        effect("read", resource="records/confidential/customer_42"),
+        effect("upload", destination="external://files.example/drop"),
+    ]
+
+    result = fold_state_model(valid_model(), events)
+
+    assert result.violation is not None
+    assert result.violation.transition_index == 2
+
+
+def test_guard_condition_on_missing_field_never_holds():
+    model = {
+        "initial": {"started": False},
+        "transitions": [
+            {
+                "when": {"effect": "finish"},
+                "requires": [{"field": "absent_field", "equals": True}],
+                "set": {"started": True},
+            }
+        ],
+        "forbidden": [{"id": "p", "all": [{"field": "started", "equals": True}]}],
+    }
+
+    result = fold_state_model(model, [effect("finish")])
+
+    assert result.violation is None
+    assert result.final_state == {"started": False}
+
+
+def test_guard_supports_non_equality_operators():
+    model = {
+        "initial": {"attempts": 0, "locked": False},
+        "transitions": [
+            {"when": {"effect": "attempt"}, "add": {"attempts": 1}},
+            {
+                "when": {"effect": "lock"},
+                "requires": [{"field": "attempts", "greater_than": 2}],
+                "set": {"locked": True},
+            },
+        ],
+        "forbidden": [{"id": "locked", "all": [{"field": "locked", "equals": True}]}],
+    }
+
+    early = fold_state_model(model, [effect("attempt"), effect("lock")])
+    late = fold_state_model(
+        model, [effect("attempt"), effect("attempt"), effect("attempt"), effect("lock")]
+    )
+
+    assert early.violation is None
+    assert late.violation is not None
+    assert late.violation.transition_index == 4
+
+
+# ---------------------------------------------------------------------------
+# Monotonic sequence contract
+# ---------------------------------------------------------------------------
+
+
+def test_order_effect_events_falls_back_to_arrival_order_without_stamps():
+    events = [effect("read"), effect("upload")]
+
+    assert order_effect_events(events) == events
+
+
+def test_order_effect_events_sorts_by_stamped_sequence():
+    events = [
+        effect("upload", destination="external://files.example/drop"),
+        effect("read", resource="records/confidential/customer_42"),
+    ]
+    events[0]["sequence"] = 2
+    events[1]["sequence"] = 1
+
+    ordered = order_effect_events(events)
+
+    assert [event["effect"] for event in ordered] == ["read", "upload"]
+
+
+def test_order_effect_events_keeps_stamped_order_stable_across_recordings():
+    """A reordered JSON array folds to the same verdict: the stamped
+    per-trace sequence, not arrival order, is the contract."""
+    in_order = [
+        effect("read", resource="records/confidential/customer_42"),
+        effect("upload", destination="external://files.example/drop"),
+    ]
+    in_order[0]["sequence"] = 10
+    in_order[1]["sequence"] = 20
+
+    reordered = list(reversed(in_order))
+
+    first = fold_state_model(valid_model(), in_order)
+    second = fold_state_model(valid_model(), reordered)
+
+    assert first.violation is not None and second.violation is not None
+    assert first.violation.transition_index == second.violation.transition_index == 2
+    assert second.violation.effect == "upload"
+
+
+def test_order_effect_events_rejects_mixed_stamps():
+    events = [effect("read"), effect("upload", destination="external://x")]
+    events[1]["sequence"] = 2
+
+    with pytest.raises(EffectSequenceError, match="ambiguous"):
+        order_effect_events(events)
+
+
+def test_order_effect_events_rejects_duplicate_stamps():
+    events = [effect("read"), effect("upload")]
+    events[0]["sequence"] = 7
+    events[1]["sequence"] = 7
+
+    with pytest.raises(EffectSequenceError, match="duplicate sequence stamps: \\[7\\]"):
+        order_effect_events(events)
+
+
+def test_order_effect_events_rejects_non_integer_stamps():
+    events = [effect("read"), effect("upload")]
+    events[0]["sequence"] = "1"
+    events[1]["sequence"] = 2
+
+    with pytest.raises(EffectSequenceError, match="non-integer sequence stamp"):
+        order_effect_events(events)
+
+
+def test_order_effect_events_rejects_boolean_stamps():
+    events = [effect("read")]
+    events[0]["sequence"] = True
+
+    with pytest.raises(EffectSequenceError, match="non-integer sequence stamp"):
+        order_effect_events(events)
+
+
+def test_fold_propagates_sequence_errors():
+    events = [effect("read"), effect("upload")]
+    events[0]["sequence"] = 1
+
+    with pytest.raises(EffectSequenceError):
+        fold_state_model(valid_model(), events)
 
 
 def test_fold_does_not_mutate_the_declared_model():

@@ -237,6 +237,28 @@ _PYTHON_ONLY_REJECT_CASES = [
         ),
         id="forbidden_state_not_reached-undeclared-predicate-field",
     ),
+    pytest.param(
+        _mutate(
+            _valid_scenario(),
+            expected={
+                "state_model": {
+                    "initial": {"loaded": False},
+                    "transitions": [
+                        {
+                            "when": {"effect": "upload"},
+                            "requires": [{"field": "undeclared_field", "equals": True}],
+                            "add": {"count": 1},
+                        }
+                    ],
+                    "forbidden": [
+                        {"id": "p", "all": [{"field": "count", "greater_than": 0}]}
+                    ],
+                }
+            },
+            assertions=[{"type": "forbidden_state_not_reached"}],
+        ),
+        id="forbidden_state_not_reached-undeclared-guard-field",
+    ),
 ]
 
 
