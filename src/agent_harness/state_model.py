@@ -213,7 +213,7 @@ def _validate_transition_rule(
         errors.append(f"{label}.when.effect is required")
 
     guard = rule.get("requires")
-    if guard is not None:
+    if "requires" in rule:
         if not isinstance(guard, list) or not guard:
             errors.append(f"{label}.requires must be a non-empty list")
         else:

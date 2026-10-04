@@ -145,6 +145,28 @@ def test_forbidden_state_assertion_requires_state_model():
         validate_scenario_data(data)
 
 
+def test_forbidden_state_assertion_rejects_explicit_null_requires_guard():
+    data = _minimal_scenario([{"type": "forbidden_state_not_reached"}])
+    state_model = _valid_state_model()
+    state_model["transitions"][1]["requires"] = None
+    data["expected"] = {"state_model": state_model}
+
+    with pytest.raises(
+        ScenarioValidationError,
+        match="requires must be a non-empty list",
+    ):
+        validate_scenario_data(data)
+
+
+def test_forbidden_state_assertion_allows_omitted_requires_guard():
+    data = _minimal_scenario([{"type": "forbidden_state_not_reached"}])
+    state_model = _valid_state_model()
+    del state_model["transitions"][1]["requires"]
+    data["expected"] = {"state_model": state_model}
+
+    assert validate_scenario_data(data).id == "goal-hijack-basic"
+
+
 def test_forbidden_state_assertion_rejects_undeclared_predicate_field():
     data = _minimal_scenario([{"type": "forbidden_state_not_reached"}])
     state_model = _valid_state_model()

@@ -230,6 +230,19 @@ def test_validate_state_model_rejects_non_list_requires():
     assert any("requires must be a non-empty list" in error for error in errors)
 
 
+def test_validate_state_model_rejects_explicit_null_requires():
+    model = valid_model()
+    model["transitions"][1]["requires"] = None
+    errors = validate_state_model(model)
+    assert any("requires must be a non-empty list" in error for error in errors)
+
+
+def test_validate_state_model_allows_omitted_requires():
+    model = valid_model()
+    del model["transitions"][1]["requires"]
+    assert validate_state_model(model) == []
+
+
 def test_validate_state_model_rejects_condition_without_operator():
     model = valid_model()
     model["forbidden"][0]["all"][0] = {"field": "confidential_loaded"}
